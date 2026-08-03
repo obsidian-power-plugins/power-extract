@@ -2,7 +2,7 @@
 
 Reads the text inside your images so other plugins can search it. No downloads, no accounts, no uploads: the recognizer is the one already built into Windows, and every image is read on your own machine.
 
-[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="200">](https://buymeacoffee.com/powerplugins)
+[![Buy me a coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/powerplugins)
 
 ## What it is for
 
