@@ -1,0 +1,563 @@
+import {
+	FuzzySuggestModal,
+	Notice,
+	Platform,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	type SettingDefinitionItem,
+	type SettingDefinitionRender,
+	TFile,
+} from "obsidian";
+import { type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "./cache";
+import { OcrEngine, type WorkerProcess, unavailableMessage, type OcrUnavailable } from "./ocr";
+import { OCR_WORKER_PS1 } from "./worker";
+
+/** Image types the recognizer is asked to read. Windows decodes png, jpeg, bmp
+ *  and gif itself; webp arrived as a system codec later and is not on every
+ *  machine, so it is offered and allowed to fail per file rather than being
+ *  refused outright here. */
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
+
+interface PowerExtractSettings {
+	/** Offer "Extract text" when right-clicking an image. */
+	rightClickMenu: boolean;
+	/** Keep what was read, so an image is only ever read once. Off is for
+	 *  people who would rather spend the time than the disk. */
+	useCache: boolean;
+}
+
+const DEFAULT_SETTINGS: PowerExtractSettings = {
+	rightClickMenu: true,
+	useCache: true,
+};
+
+/** What other plugins call. Deliberately the same shape the Text Extractor
+ *  plugin exposes, so a plugin that supports one supports the other with a
+ *  change of id and no change of code. */
+export interface PowerExtractApi {
+	/** Text found in an image, from cache when it is there. Rejects when this
+	 *  device cannot read images at all, or when this file could not be read. */
+	extractText(file: TFile): Promise<string>;
+	/** Is this a file type this plugin reads? */
+	canExtract(file: TFile): boolean;
+	/** Can this device read anything at all? False on mobile, on macOS and
+	 *  Linux, and on a Windows install with no OCR language. */
+	isAvailable(): boolean;
+	/** The recognizer's language tag once a worker has started, else null. */
+	language(): string | null;
+}
+
+export default class PowerExtractPlugin extends Plugin {
+	settings: PowerExtractSettings = DEFAULT_SETTINGS;
+	private baseline: PowerExtractSettings = DEFAULT_SETTINGS;
+	private loadFailed = false;
+
+	engine: OcrEngine | null = null;
+	private cache: CacheMap = {};
+	private cacheDirty = false;
+	private cacheTimer: number | null = null;
+	private scriptReady: Promise<string> | null = null;
+	/** Extractions in flight, keyed by path: two callers asking for the same
+	 *  image at once (the search index and a right-click) wait on one read
+	 *  rather than starting two. */
+	private inFlight = new Map<string, Promise<string>>();
+
+	api: PowerExtractApi = {
+		extractText: (file) => this.extractText(file),
+		canExtract: (file) => this.canExtract(file),
+		isAvailable: () => this.unavailableReason() === null,
+		language: () => this.engine?.language ?? null,
+	};
+
+	async onload() {
+		await this.loadSettings();
+		this.cache = this.settings.useCache ? parseCache(await this.readCacheFile()) : {};
+
+		this.engine = new OcrEngine({
+			spawn: () => this.spawnWorker(),
+			log: (message, detail) => console.warn("Power Extract: " + message, detail ?? ""),
+		});
+
+		this.addSettingTab(new PowerExtractSettingTab(this));
+
+		this.addCommand({
+			id: "copy-image-text",
+			name: "Copy the text from an image",
+			callback: () => new ImagePickerModal(this).open(),
+		});
+
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				if (!this.settings.rightClickMenu) return;
+				if (!(file instanceof TFile) || !this.canExtract(file)) return;
+				menu.addItem((item) =>
+					item
+						.setTitle("Copy text from image")
+						.setIcon("scan-text")
+						.onClick(() => void this.copyTextToClipboard(file))
+				);
+			})
+		);
+
+		// An image deleted from the vault takes its cached text with it, so the
+		// file does not accumulate the whole history of everything ever pasted.
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				if (file instanceof TFile && this.cache[file.path]) {
+					delete this.cache[file.path];
+					this.queueCacheSave();
+				}
+			})
+		);
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				const entry = this.cache[oldPath];
+				if (!entry) return;
+				delete this.cache[oldPath];
+				if (file instanceof TFile) this.cache[file.path] = entry;
+				this.queueCacheSave();
+			})
+		);
+	}
+
+	onunload() {
+		this.engine?.stop();
+		if (this.cacheTimer !== null) {
+			window.clearTimeout(this.cacheTimer);
+			this.cacheTimer = null;
+		}
+		if (this.cacheDirty) void this.writeCacheFile();
+	}
+
+	/* ---------------- extraction ---------------- */
+
+	canExtract(file: TFile): boolean {
+		return IMAGE_EXTS.has(file.extension.toLowerCase());
+	}
+
+	/**
+	 * The one way text comes out of an image.
+	 *
+	 * Cache first, then the recognizer. A second caller asking for the same
+	 * image while the first is still waiting joins that read instead of starting
+	 * its own: the search index sweeping a folder and someone right-clicking a
+	 * screenshot in it is an ordinary way for that to happen.
+	 */
+	async extractText(file: TFile): Promise<string> {
+		if (!this.canExtract(file)) {
+			throw new Error(`Power Extract does not read .${file.extension} files.`);
+		}
+		const cached = this.cache[file.path];
+		if (this.settings.useCache && isFresh(cached, file.stat.mtime, file.stat.size)) return cached.t;
+
+		const existing = this.inFlight.get(file.path);
+		if (existing) return existing;
+
+		const run = this.readImage(file).finally(() => this.inFlight.delete(file.path));
+		this.inFlight.set(file.path, run);
+		return run;
+	}
+
+	private async readImage(file: TFile): Promise<string> {
+		const why = this.unavailableReason();
+		if (why) throw new Error(unavailableMessage(why));
+		const engine = this.engine;
+		if (!engine) throw new Error("Power Extract is not loaded.");
+
+		const scriptPath = await this.ensureWorkerScript();
+		if (!scriptPath) throw new Error("Power Extract could not write its OCR worker.");
+
+		const abs = this.absolutePath(file.path);
+		if (!abs) throw new Error("Power Extract needs a vault stored on disk.");
+
+		const text = (await engine.extract(abs)).trim();
+		if (this.settings.useCache) {
+			this.cache[file.path] = { m: file.stat.mtime, s: file.stat.size, t: text };
+			this.queueCacheSave();
+		}
+		return text;
+	}
+
+	/** Why this device cannot read images, or null when it can. Checked before
+	 *  every start so the answer stays current if a worker later reports that
+	 *  Windows has no recognizer. */
+	unavailableReason(): OcrUnavailable | null {
+		if (!Platform.isDesktopApp) return "no-node";
+		if (this.nodeProcess()?.platform !== "win32") return "not-windows";
+		return this.engine?.unavailable ?? null;
+	}
+
+	async copyTextToClipboard(file: TFile) {
+		const notice = new Notice("Power Extract: reading " + file.name + "...", 0);
+		try {
+			const text = await this.extractText(file);
+			notice.hide();
+			if (!text) {
+				new Notice("Power Extract: no text found in " + file.name + ".");
+				return;
+			}
+			await navigator.clipboard.writeText(text);
+			const preview = text.length > 80 ? text.slice(0, 80) + "..." : text;
+			new Notice("Power Extract: copied " + text.length + " characters.\n" + preview, 6000);
+		} catch (e) {
+			notice.hide();
+			new Notice("Power Extract: " + (e instanceof Error ? e.message : String(e)), 8000);
+		}
+	}
+
+	/* ---------------- the worker ---------------- */
+
+	/** node:child_process, or null when there is none (mobile). Required
+	 *  lazily: naming it at the top of the file would break the plugin on a
+	 *  phone before any of it ran. */
+	private nodeCp(): typeof import("node:child_process") | null {
+		try {
+			return require("node:child_process") as typeof import("node:child_process");
+		} catch {
+			return null;
+		}
+	}
+
+	private nodeProcess(): NodeJS.Process | null {
+		try {
+			return process;
+		} catch {
+			return null;
+		}
+	}
+
+	private spawnWorker(): WorkerProcess {
+		const cp = this.nodeCp();
+		if (!cp) throw new Error("no child processes on this platform");
+		const script = this.scriptAbsPath;
+		if (!script) throw new Error("the OCR worker has not been written yet");
+		// No -ExecutionPolicy override: the script is written here by the plugin
+		// rather than downloaded, so it carries no mark of the web and the
+		// default RemoteSigned policy runs it as-is. Asking for Bypass when it
+		// is not needed is the kind of thing that makes a security product take
+		// an interest.
+		return cp.spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script], {
+			windowsHide: true,
+		}) as unknown as WorkerProcess;
+	}
+
+	private scriptAbsPath: string | null = null;
+
+	/** Put the worker script on disk next to the plugin, once per session.
+	 *  Rewritten whenever it differs from what this build carries, which covers
+	 *  both a fresh install and an upgrade that changed the script. */
+	private ensureWorkerScript(): Promise<string> {
+		if (!this.scriptReady) {
+			this.scriptReady = (async () => {
+				const rel = `${this.manifest.dir}/ocr-worker.ps1`;
+				const adapter = this.app.vault.adapter;
+				let current: string | null = null;
+				try {
+					current = (await adapter.exists(rel)) ? await adapter.read(rel) : null;
+				} catch {
+					current = null;
+				}
+				if (current !== OCR_WORKER_PS1) await adapter.write(rel, OCR_WORKER_PS1);
+				this.scriptAbsPath = this.absolutePath(rel);
+				return this.scriptAbsPath ?? "";
+			})().catch((e) => {
+				console.warn("Power Extract: could not write the OCR worker", e);
+				this.scriptReady = null; // let a later attempt try again
+				return "";
+			});
+		}
+		return this.scriptReady;
+	}
+
+	/** A vault path as the operating system sees it. Null when the vault is not
+	 *  a folder on disk, which is every mobile vault. */
+	private absolutePath(vaultRelative: string): string | null {
+		const adapter = this.app.vault.adapter as unknown as {
+			getFullPath?: (p: string) => string;
+			basePath?: string;
+		};
+		if (typeof adapter.getFullPath === "function") return adapter.getFullPath(vaultRelative);
+		if (adapter.basePath) return `${adapter.basePath}/${vaultRelative}`;
+		return null;
+	}
+
+	/* ---------------- cache file ---------------- */
+
+	private cachePath(): string {
+		return `${this.manifest.dir}/ocr-cache.json`;
+	}
+
+	private async readCacheFile(): Promise<string | null> {
+		try {
+			const path = this.cachePath();
+			return (await this.app.vault.adapter.exists(path)) ? await this.app.vault.adapter.read(path) : null;
+		} catch (e) {
+			console.warn("Power Extract: could not read the cache", e);
+			return null;
+		}
+	}
+
+	private queueCacheSave() {
+		this.cacheDirty = true;
+		if (this.cacheTimer !== null) window.clearTimeout(this.cacheTimer);
+		// A vault-wide sweep finishes an image every 35ms; writing the whole file
+		// that often would cost more than the reading does.
+		this.cacheTimer = window.setTimeout(() => {
+			this.cacheTimer = null;
+			void this.writeCacheFile();
+		}, 3000);
+	}
+
+	private async writeCacheFile() {
+		if (!this.settings.useCache) return;
+		try {
+			await this.app.vault.adapter.write(this.cachePath(), serializeCache(this.cache));
+			this.cacheDirty = false;
+		} catch (e) {
+			console.warn("Power Extract: could not save the cache", e);
+		}
+	}
+
+	cacheSummary() {
+		return cacheStats(this.cache);
+	}
+
+	/** Drop cached text for images the vault no longer holds. */
+	prune(): number {
+		const live = new Set(this.app.vault.getFiles().map((f) => f.path));
+		const { map, removed } = pruneCache(this.cache, live);
+		this.cache = map;
+		if (removed) this.queueCacheSave();
+		return removed;
+	}
+
+	/** Forget everything read so far, and take the file with it.
+	 *
+	 *  Deleting rather than writing an empty one, because this is also what
+	 *  turning the cache off calls, and the write path declines to run when the
+	 *  cache is off: asking to be forgotten and leaving the text sitting on disk
+	 *  is the one outcome this must not have. The pending debounced write is
+	 *  cancelled first, or it would put the file straight back. */
+	async clearCache() {
+		this.cache = {};
+		this.cacheDirty = false;
+		if (this.cacheTimer !== null) {
+			window.clearTimeout(this.cacheTimer);
+			this.cacheTimer = null;
+		}
+		try {
+			const path = this.cachePath();
+			if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+		} catch (e) {
+			console.warn("Power Extract: could not remove the cache", e);
+		}
+	}
+
+	/* ---------------- settings ---------------- */
+
+	private async loadSettings() {
+		const disk = await this.readSettings();
+		if (disk === null) this.loadFailed = true;
+		this.settings = { ...DEFAULT_SETTINGS, ...(disk ?? {}) };
+		this.baseline = structuredClone(this.settings);
+	}
+
+	private async readSettings(): Promise<Partial<PowerExtractSettings> | null> {
+		try {
+			return ((await this.loadData()) as Partial<PowerExtractSettings> | null) ?? {};
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * The one write path for settings, matching the rest of the suite: re-read
+	 * the synced file and carry only the keys this device actually changed, so a
+	 * device that has been asleep cannot publish its stale copy over everyone
+	 * else's. A boot that never managed to read writes nothing at all, because
+	 * defaults must not land on disk over the real thing.
+	 */
+	async persistSettings() {
+		const disk = await this.readSettings();
+		if (this.loadFailed && !disk) return;
+		this.loadFailed = false;
+		const merged = { ...this.settings };
+		if (disk) {
+			for (const key of Object.keys(merged) as (keyof PowerExtractSettings)[]) {
+				if (!(key in disk)) continue;
+				const changedByUs = JSON.stringify(this.settings[key]) !== JSON.stringify(this.baseline[key]);
+				if (!changedByUs) (merged[key] as unknown) = disk[key];
+			}
+		}
+		Object.assign(this.settings, merged);
+		await this.saveData(this.settings);
+		this.baseline = structuredClone(this.settings);
+	}
+}
+
+/* ---------------- pick an image ---------------- */
+
+class ImagePickerModal extends FuzzySuggestModal<TFile> {
+	constructor(private readonly plugin: PowerExtractPlugin) {
+		super(plugin.app);
+		this.setPlaceholder("Pick an image to read");
+	}
+
+	getItems(): TFile[] {
+		return this.plugin.app.vault.getFiles().filter((f) => this.plugin.canExtract(f));
+	}
+
+	getItemText(file: TFile): string {
+		return file.path;
+	}
+
+	onChooseItem(file: TFile) {
+		void this.plugin.copyTextToClipboard(file);
+	}
+}
+
+/* ---------------- settings tab ---------------- */
+
+interface Row {
+	name: string;
+	desc?: string;
+	build: (setting: Setting) => void;
+}
+
+class PowerExtractSettingTab extends PluginSettingTab {
+	constructor(private readonly plugin: PowerExtractPlugin) {
+		super(plugin.app, plugin);
+	}
+
+	/** Obsidian 1.13 and up builds the tab from these and never calls display().
+	 *  Every row renders itself rather than declaring a `control`, so each one
+	 *  stays on the plugin's own save path instead of Obsidian's generic one. */
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "",
+				searchable: false, // a masthead, not a setting
+				render: (s) => {
+					s.settingEl.empty();
+					this.renderAbout(s.settingEl);
+				},
+			},
+			...this.rows().map(
+				(row): SettingDefinitionRender => ({
+					name: row.name,
+					desc: row.desc,
+					render: (s) => row.build(s),
+				})
+			),
+		];
+	}
+
+	/** The pre-1.13 renderer. It draws the same rows the definitions above
+	 *  declare, so the two only differ in who does the drawing. */
+	display() {
+		const root = this.containerEl;
+		root.empty();
+		this.renderAbout(root.createDiv({ cls: "px-about-standalone" }));
+		for (const row of this.rows()) {
+			const setting = new Setting(root).setName(row.name);
+			if (row.desc) setting.setDesc(row.desc);
+			row.build(setting);
+		}
+	}
+
+	private renderAbout(el: HTMLElement) {
+		el.addClass("px-about");
+		const head = el.createDiv({ cls: "px-about-head" });
+		head.createSpan({ cls: "px-about-name", text: this.plugin.manifest.name });
+		head.createSpan({ cls: "px-about-version", text: "v" + this.plugin.manifest.version });
+		el.createDiv({ cls: "px-about-desc", text: this.plugin.manifest.description });
+	}
+
+	private rows(): Row[] {
+		const plugin = this.plugin;
+		const rows: Row[] = [];
+
+		rows.push({
+			name: "This device",
+			desc: "Where the reading happens, and whether it can happen here.",
+			build: (s) => {
+				const why = plugin.unavailableReason();
+				const lang = plugin.api.language();
+				const text = why
+					? capitalize(unavailableMessage(why))
+					: "Ready. Windows reads the images on this device" + (lang ? ", in " + lang + "." : ".");
+				s.descEl.createDiv({ cls: "px-status", text });
+			},
+		});
+
+		rows.push({
+			name: "Text already read",
+			desc: "Images are read once and remembered, so this grows as the vault is indexed.",
+			build: (s) => {
+				const { total, withText } = plugin.cacheSummary();
+				s.descEl.createDiv({
+					cls: "px-status",
+					text: total
+						? `${total.toLocaleString()} images read, ${withText.toLocaleString()} of them holding text.`
+						: "Nothing read yet.",
+				});
+				s.addButton((b) =>
+					b.setButtonText("Forget all").onClick(async () => {
+						await plugin.clearCache();
+						new Notice("Power Extract: cleared. Images will be read again as they are needed.");
+						this.refresh();
+					})
+				);
+				s.addButton((b) =>
+					b.setButtonText("Tidy up").setTooltip("Drop text for images the vault no longer has").onClick(() => {
+						const removed = plugin.prune();
+						new Notice(removed ? `Power Extract: dropped ${removed} stale entries.` : "Power Extract: nothing to tidy.");
+						this.refresh();
+					})
+				);
+			},
+		});
+
+		rows.push({
+			name: "Right-click an image to read it",
+			desc: "Adds Copy text from image to the menu on any image file.",
+			build: (s) => {
+				s.addToggle((t) =>
+					t.setValue(plugin.settings.rightClickMenu).onChange((v) => {
+						plugin.settings.rightClickMenu = v;
+						void plugin.persistSettings();
+					})
+				);
+			},
+		});
+
+		rows.push({
+			name: "Remember what was read",
+			desc: "Keeps the text so an image is never read twice. Turning this off makes every search re-read the vault.",
+			build: (s) => {
+				s.addToggle((t) =>
+					t.setValue(plugin.settings.useCache).onChange(async (v) => {
+						plugin.settings.useCache = v;
+						await plugin.persistSettings();
+						if (!v) await plugin.clearCache();
+						this.refresh();
+					})
+				);
+			},
+		});
+
+		return rows;
+	}
+
+	/** Redraw after something changed the numbers on show. */
+	private refresh() {
+		const tab = this as unknown as { update?: () => void };
+		if (tab.update) tab.update();
+		else this.display();
+	}
+}
+
+function capitalize(s: string): string {
+	return s.charAt(0).toUpperCase() + s.slice(1);
+}

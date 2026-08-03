@@ -1,0 +1,20 @@
+# Changelog
+
+All notable changes to Power Extract. Dates are when the version was cut.
+
+## 1.0.0 - 2026-08-02
+
+First release. Replaces the Text Extractor plugin for the one thing it was being used for in this suite: reading the text inside images.
+
+### Added
+
+- **Text out of images, through the OCR built into Windows.** Nothing is downloaded and no image leaves the machine. Measured against the plugin this replaces, across 80 images taken from a real vault: 30 of the 40 images tesseract.js had given up on came back with text, the same images yielded 39,435 characters against 25,364, and the share of output that is made of real words went from 0.55 to 0.70. An image takes about 35ms rather than seconds, which puts a 13,000-image vault at roughly eight minutes rather than most of a day.
+- **A worker that stays up.** Standing the recognizer up costs about 220ms and reading an image costs about 35ms, so a process per image would spend six times longer starting than working. One PowerShell worker takes images one at a time for as long as there is work, then shuts itself down after 30 seconds of quiet so nothing lingers.
+- **A cache that is one file.** The plugin this replaces wrote a separate JSON per image and had accumulated 13,200 of them in a folder every sync tool has to walk on every pass. The same content is one object here, keyed by modification time and size so a file restored from a backup is noticed and re-read.
+- **Copy text from image**, on the right-click menu of any image and in the command palette.
+- **An API for other plugins**, the same shape Text Extractor exposes, so supporting both is a matter of trying both ids.
+
+### Notes
+
+- Reading happens on desktop Windows. macOS, Linux, and mobile have no engine to call and are told so plainly; anything already read stays readable everywhere, because the cache travels with the vault.
+- Reaching the Windows recognizer means starting `powershell.exe`. The README says exactly how, and the script it runs is in `src/worker.ts`.

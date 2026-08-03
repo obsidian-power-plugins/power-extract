@@ -1,0 +1,29 @@
+{
+	"name": "powerextract",
+	"version": "1.0.0",
+	"description": "Obsidian plugin: read the text inside images with the OCR built into Windows, and hand it to other plugins",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"test": "esbuild tests/tests.ts --bundle --format=cjs --outfile=tests.cjs && node tests.cjs",
+		"deploy": "npm run build && node deploy.mjs"
+	},
+	"keywords": [
+		"obsidian",
+		"plugin",
+		"ocr",
+		"images",
+		"text-extraction"
+	],
+	"author": "Power Plugins",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^26.1.1",
+		"esbuild": "^0.24.0",
+		"obsidian": "latest",
+		"tslib": "^2.6.2",
+		"typescript": "^5.4.5"
+	}
+}

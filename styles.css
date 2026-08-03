@@ -1,0 +1,42 @@
+/* Power Extract */
+
+/* The masthead at the top of the settings tab, matching the rest of the suite. */
+.px-about {
+	display: block;
+}
+
+.px-about-standalone {
+	padding: 2px 0 12px;
+}
+
+.px-about-head {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+
+.px-about-name {
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.px-about-version {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	background: var(--background-modifier-hover);
+	border-radius: 4px;
+	padding: 1px 6px;
+}
+
+.px-about-desc {
+	margin-top: 4px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+/* A line of fact under a setting's description: what this device can do, how
+   much has been read so far. Sits apart from the description above it. */
+.px-status {
+	margin-top: 4px;
+	color: var(--text-normal);
+}
