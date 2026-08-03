@@ -2,6 +2,12 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.0 - 2026-08-03
+
+### Changed
+
+- **Desktop only.** Reading an image means starting `powershell.exe`, and a plugin that reaches for a process has to declare it, so `isDesktopOnly` is now true and Obsidian no longer offers Power Extract on a phone or tablet. The cost is worth naming plainly: 1.0.0 installed on mobile and served text it had already read out of the cache, which is how a screenshot turned up in Power Explorer's search there. That no longer happens. Nothing changes on desktop, macOS and Linux included, where the cache still answers for images this machine cannot read itself.
+
 ## 1.0.0 - 2026-08-02
 
 First release. Replaces the Text Extractor plugin for the one thing it was being used for in this suite: reading the text inside images.

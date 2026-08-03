@@ -29,7 +29,7 @@ You can read the whole script: it is in `src/worker.ts` in this repository, and 
 
 - **Images:** png, jpg, jpeg, bmp, gif, and webp where Windows has the codec.
 - **Once each.** What comes out is remembered in `ocr-cache.json` next to the plugin, keyed by the file's modification time and size, so an image is read once and never again until it changes. A vault of 13,000 screenshots takes about eight minutes to get through the first time, and nothing after that.
-- **Desktop Windows does the reading.** On macOS, Linux, and mobile there is no engine to call, so a plugin that asks gets a clear answer saying so. Anything already read stays readable everywhere, because the cache travels with the vault.
+- **Desktop Windows does the reading, and the plugin is desktop only.** Reaching the recognizer means starting a process, which the mobile app cannot do, so Obsidian does not offer Power Extract on a phone or tablet. On desktop macOS and Linux there is no engine to call and a plugin that asks gets a clear answer saying so, but anything already read stays readable there, because the cache travels with the vault.
 
 ## Settings
 
