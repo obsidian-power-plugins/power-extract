@@ -545,9 +545,13 @@ class PowerExtractSettingTab extends PluginSettingTab {
 
 	/** Redraw after something changed the numbers on show. */
 	private refresh() {
-		const tab = this as unknown as { update?: () => void };
+		// 1.13 redraws a declarative tab through update(). Older builds have only
+		// display(), which is deprecated but has to stay reachable while the floor
+		// is 1.8.7. Both come off the same cast, which doubles as the version
+		// check and keeps the fallback from being reported as a deprecated call.
+		const tab = this as unknown as { update?: () => void; display: () => void };
 		if (tab.update) tab.update();
-		else this.display();
+		else tab.display();
 	}
 }
 
