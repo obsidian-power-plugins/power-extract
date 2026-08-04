@@ -1,5 +1,5 @@
 /**
- * The OCR worker, as source that ships inside main.js.
+ * The OCR worker: the source that ships inside main.js, and how it is started.
  *
  * Obsidian installs exactly three files (manifest.json, main.js, styles.css),
  * so a companion script cannot ride along as a fourth. It travels as this
@@ -26,6 +26,36 @@
  *   obvious PowerShell would reach for one, this uses the regex spelling
  *   instead: "\t" for a tab, -like for the generic type name.
  */
+
+/** Where the recognizer's host lives, given the value of %SystemRoot%.
+ *
+ *  An absolute path rather than the bare name. Started without a shell, Windows
+ *  resolves a bare program name against the calling process's own directory and
+ *  the working directory before it ever reaches PATH, so a file named
+ *  powershell.exe dropped in either one would be started in place of the real
+ *  one. Naming the path outright takes that away.
+ *
+ *  The bare name is left as the answer only when the environment has no
+ *  SystemRoot at all, where a guessed path would be worse than letting Windows
+ *  look. */
+export function powershellPath(systemRoot: string | undefined | null): string {
+	const root = (systemRoot ?? "").trim().replace(/[\\/]+$/, "");
+	if (!root) return "powershell.exe";
+	return root + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+}
+
+/** Everything the host is asked for, and nothing else.
+ *
+ *  No execution-policy override: the script is written by the plugin rather than
+ *  downloaded, so it carries no mark of the web and the default RemoteSigned
+ *  policy runs it as it stands. No encoded command either, so what runs is a
+ *  file on disk that anyone can open and read. Both are checked by a test,
+ *  because they are the kind of flag that gets added in a hurry while debugging
+ *  and then never taken out again. */
+export function workerArgs(scriptPath: string): string[] {
+	return ["-NoProfile", "-NonInteractive", "-File", scriptPath];
+}
+
 export const OCR_WORKER_PS1 = String.raw`
 # Power Extract OCR worker. Written by the plugin; safe to delete when it is
 # not running (it is recreated on demand).

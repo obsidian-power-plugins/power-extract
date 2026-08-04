@@ -18,12 +18,25 @@ Windows has shipped an OCR engine since Windows 10, the same one behind Snipping
 
 Reaching it takes a short PowerShell script, because the engine is a Windows Runtime API that Obsidian itself cannot call. **This plugin therefore starts `powershell.exe`,** which is worth stating plainly:
 
-- The script is written to this plugin's own folder (`ocr-worker.ps1`) the first time an image is read, and is rewritten whenever the plugin updates. Nothing is downloaded, and it is not run from a temporary folder.
-- It is started with `-NoProfile -NonInteractive -File`. There is no execution-policy override, no encoded command, and no hidden window flag beyond the one that stops a console flashing on screen.
-- It receives file paths and returns text. It opens no network connection and writes no file.
-- One process serves every image and shuts itself down after 30 seconds with nothing to do, so nothing lingers when you are not using it.
+- **A fixed program, at a fixed path, with fixed arguments.** The host is named by its full path, `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, so a file called `powershell.exe` sitting somewhere earlier in the search order cannot answer instead. The arguments are `-NoProfile -NonInteractive -File <script>` and never anything else. There is no shell in between, no execution-policy override, and no encoded command.
+- **Nothing you type reaches it.** Image paths are sent to the running worker over stdin, not on a command line, so no file name and no setting can turn into a second command.
+- **The script is the one shipped in `main.js`.** It is written to this plugin's own folder as `ocr-worker.ps1`, and it is read back and compared against the shipped copy before every start. Anything that differs is overwritten first. That folder lives in your vault, where sync services write and other applications can reach, so an edit from any source is undone rather than run.
+- **It reads images and returns text.** It opens no network connection and writes no file.
+- **One process serves every image** and shuts itself down after 30 seconds with nothing to do, so nothing lingers when you are not using it.
 
 You can read the whole script: it is in `src/worker.ts` in this repository, and on disk in the plugin's folder once it has run.
+
+## What it can reach on your machine
+
+The community catalog's scan reports what a plugin is capable of, not what it does with it. Power Extract reaches for three things, and each one is here for a reason you can check in the source.
+
+| What the scan reports | What it is | Where |
+| --- | --- | --- |
+| **Shell execution** via `child_process` | Starting the OCR host described above. There is one call, it takes no input from anywhere, and it is the only way to reach the Windows recognizer from a plugin. | [`src/main.ts`](src/main.ts), `spawnWorker` |
+| **Vault enumeration** | Listing your files, twice: to offer image files in the **Copy the text from an image** picker, and to find cached text belonging to images the vault no longer has, so **Tidy up** can drop it. Only paths and extensions are looked at, and the list never leaves Obsidian. | [`src/main.ts`](src/main.ts), `prune` and `ImagePickerModal` |
+| **Clipboard access** | Writing, never reading. One line, reached only from the menu item or the command you just chose, and what it puts there is the text from the image you picked. The plugin never asks what was on your clipboard before. | [`src/main.ts`](src/main.ts), `copyTextToClipboard` |
+
+There is no network code in this plugin at all: no `fetch`, no `XMLHttpRequest`, no `requestUrl`. Images are read on your machine and the text stays there.
 
 ## What it reads, and where
 

@@ -7,7 +7,7 @@
 
 import { CACHE_VERSION, type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "../src/cache";
 import { OcrEngine, type WorkerProcess, unavailableMessage } from "../src/ocr";
-import { OCR_WORKER_PS1 } from "../src/worker";
+import { OCR_WORKER_PS1, powershellPath, workerArgs } from "../src/worker";
 import { compareVersions, isDowngrade, versionFromManifest } from "../deploy-guard.mjs";
 
 let failures = 0;
@@ -65,6 +65,38 @@ async function rejection(p: Promise<unknown>): Promise<string> {
 	eq(OCR_WORKER_PS1.includes("${"), false, "nothing in the script looks like an interpolation");
 	ok(OCR_WORKER_PS1.includes("TryCreateFromUserProfileLanguages"), "it creates a recognizer");
 	ok(OCR_WORKER_PS1.includes("@@quit"), "it honors the quit message");
+}
+
+// --- how the worker is started ---
+{
+	console.log("\nstarting the worker");
+	// Without a shell, Windows looks for a bare program name in the calling
+	// process's directory and the working directory before PATH, so a bare
+	// "powershell.exe" can be answered by a file someone else put there.
+	eq(
+		powershellPath("C:\\Windows"),
+		"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+		"the host is named by absolute path"
+	);
+	eq(powershellPath("C:\\Windows\\"), powershellPath("C:\\Windows"), "a trailing separator makes no difference");
+	eq(powershellPath("D:\\Win"), "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "Windows need not be on C:");
+	// Only reachable on a Windows with no SystemRoot, where a guess would be
+	// worse than letting Windows look.
+	eq(powershellPath(undefined), "powershell.exe", "no SystemRoot falls back to the bare name");
+	eq(powershellPath("   "), "powershell.exe", "and so does a blank one");
+
+	const args = workerArgs("C:\\Vault\\.obsidian\\plugins\\powerextract\\ocr-worker.ps1");
+	eq(args, ["-NoProfile", "-NonInteractive", "-File", "C:\\Vault\\.obsidian\\plugins\\powerextract\\ocr-worker.ps1"], "the arguments are the script and nothing else");
+	// These three are what a security review looks for, and each is the kind of
+	// flag that gets added while debugging and then left in.
+	const flags = args.join(" ").toLowerCase();
+	eq(flags.includes("-executionpolicy"), false, "no execution-policy override is asked for");
+	eq(flags.includes("-encodedcommand"), false, "the script is not passed as an encoded command");
+	eq(flags.includes("-command"), false, "nothing is passed as a command at all");
+	// The path is an argument, never spliced into a command string, so a vault
+	// folder with a quote or a semicolon in its name is a path and not syntax.
+	eq(workerArgs('C:\\a";calc.exe;"b\\w.ps1').length, 4, "an awkward path stays one argument");
+	eq(workerArgs('C:\\a";calc.exe;"b\\w.ps1')[3], 'C:\\a";calc.exe;"b\\w.ps1', "and is passed through untouched");
 }
 
 // --- cache ---

@@ -1,7 +1,7 @@
 {
 	"id": "powerextract",
 	"name": "Power Extract",
-	"version": "1.1.2",
+	"version": "1.1.3",
 	"minAppVersion": "1.8.7",
 	"description": "Read the text inside images so other plugins can search it. Uses the OCR built into Windows, so nothing is downloaded and no image ever leaves your device.",
 	"author": "Power Plugins",

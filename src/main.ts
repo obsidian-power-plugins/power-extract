@@ -12,7 +12,7 @@ import {
 import { spawn } from "node:child_process";
 import { type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "./cache";
 import { OcrEngine, type WorkerProcess, unavailableMessage, type OcrUnavailable } from "./ocr";
-import { OCR_WORKER_PS1 } from "./worker";
+import { OCR_WORKER_PS1, powershellPath, workerArgs } from "./worker";
 
 /** Image types the recognizer is asked to read. Windows decodes png, jpeg, bmp
  *  and gif itself; webp arrived as a system codec later and is not on every
@@ -27,8 +27,17 @@ const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
 const spawnProcess = spawn as unknown as (
 	cmd: string,
 	args: string[],
-	opts: { windowsHide: boolean }
+	opts: { windowsHide: boolean; shell: boolean }
 ) => WorkerProcess;
+
+/** %SystemRoot%, read through a declared shape for the same reason spawn is
+ *  narrowed above, and because Obsidian has nothing of its own that answers
+ *  this. Nothing is written to the environment and nothing else is read from
+ *  it. */
+function systemRoot(): string | undefined {
+	const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+	return proc?.env?.SystemRoot;
+}
 
 interface PowerExtractSettings {
 	/** Offer "Extract text" when right-clicking an image. */
@@ -176,7 +185,7 @@ export default class PowerExtractPlugin extends Plugin {
 		const engine = this.engine;
 		if (!engine) throw new Error("Power Extract is not loaded.");
 
-		const scriptPath = await this.ensureWorkerScript();
+		const scriptPath = await this.ensureWorkerScript(engine.running);
 		if (!scriptPath) throw new Error("Power Extract could not write its OCR worker.");
 
 		const abs = this.absolutePath(file.path);
@@ -208,6 +217,11 @@ export default class PowerExtractPlugin extends Plugin {
 				new Notice("Power Extract: no text found in " + file.name + ".");
 				return;
 			}
+			// Written, never read. The plugin has no reason to know what was on
+			// the clipboard before this, and never asks: this is the only line in
+			// the plugin that touches it, it runs only from a menu item or a
+			// command the person just chose, and it puts back exactly the text
+			// that came out of the image they picked.
 			await navigator.clipboard.writeText(text);
 			const preview = text.length > 80 ? text.slice(0, 80) + "..." : text;
 			new Notice("Power Extract: copied " + text.length + " characters.\n" + preview, 6000);
@@ -221,46 +235,72 @@ export default class PowerExtractPlugin extends Plugin {
 
 	/** Start a PowerShell hosting the recognizer. Desktop-only by manifest, so
 	 *  the import at the top of this file is always satisfied by the time this
-	 *  runs. */
+	 *  runs.
+	 *
+	 *  The one process this plugin ever starts, and this is the only line that
+	 *  starts it. It is a fixed program at a fixed path with fixed arguments:
+	 *  nothing a user types, nothing from a file, and nothing from another
+	 *  plugin reaches this call. Image paths go to the worker over stdin, well
+	 *  away from a command line. `shell: false` is spawn's default and is
+	 *  written out anyway, because it is the difference between running a
+	 *  program and handing a string to a command interpreter, and that should
+	 *  not have to be inferred from an absence. */
 	private spawnWorker(): WorkerProcess {
 		const script = this.scriptAbsPath;
 		if (!script) throw new Error("the OCR worker has not been written yet");
-		// No -ExecutionPolicy override: the script is written here by the plugin
-		// rather than downloaded, so it carries no mark of the web and the
-		// default RemoteSigned policy runs it as-is. Asking for Bypass when it
-		// is not needed is the kind of thing that makes a security product take
-		// an interest.
-		return spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script], {
+		return spawnProcess(powershellPath(systemRoot()), workerArgs(script), {
 			windowsHide: true,
+			shell: false,
 		});
 	}
 
 	private scriptAbsPath: string | null = null;
 
-	/** Put the worker script on disk next to the plugin, once per session.
-	 *  Rewritten whenever it differs from what this build carries, which covers
-	 *  both a fresh install and an upgrade that changed the script. */
-	private ensureWorkerScript(): Promise<string> {
-		if (!this.scriptReady) {
-			this.scriptReady = (async () => {
-				const rel = `${this.manifest.dir}/ocr-worker.ps1`;
-				const adapter = this.app.vault.adapter;
-				let current: string | null = null;
-				try {
-					current = (await adapter.exists(rel)) ? await adapter.read(rel) : null;
-				} catch {
-					current = null;
-				}
-				if (current !== OCR_WORKER_PS1) await adapter.write(rel, OCR_WORKER_PS1);
-				this.scriptAbsPath = this.absolutePath(rel);
-				return this.scriptAbsPath ?? "";
-			})().catch((e) => {
-				console.warn("Power Extract: could not write the OCR worker", e);
-				this.scriptReady = null; // let a later attempt try again
-				return "";
-			});
-		}
+	/**
+	 * The worker script on disk, confirmed to be the script this build carries.
+	 *
+	 * Confirmed before every start, not once a session. The file sits in the
+	 * vault, which is a folder sync services write to and other applications can
+	 * open, and a worker that has idled out is started again from whatever the
+	 * file holds at that moment. A check from twenty minutes ago says nothing
+	 * about that, so the only check worth having is one taken with the start it
+	 * belongs to. While a worker is up, the script it is already running cannot
+	 * be swapped underneath it, so that is the one case the check is skipped.
+	 *
+	 * Rewriting on any difference covers a fresh install, an upgrade that changed
+	 * the script, and an edit by anything else, without having to tell them
+	 * apart: the only script that ever runs is the one shipped in main.js.
+	 *
+	 * Checks queue behind one another, so two images arriving together cannot
+	 * have one reading the file while the other is rewriting it.
+	 */
+	private ensureWorkerScript(workerRunning: boolean): Promise<string> {
+		if (workerRunning && this.scriptReady) return this.scriptReady;
+		const check = () => this.writeWorkerScript();
+		this.scriptReady = (this.scriptReady ?? Promise.resolve("")).then(check, check);
 		return this.scriptReady;
+	}
+
+	private async writeWorkerScript(): Promise<string> {
+		const rel = `${this.manifest.dir}/ocr-worker.ps1`;
+		const adapter = this.app.vault.adapter;
+		let current: string | null = null;
+		try {
+			current = (await adapter.exists(rel)) ? await adapter.read(rel) : null;
+		} catch {
+			current = null;
+		}
+		try {
+			if (current !== OCR_WORKER_PS1) await adapter.write(rel, OCR_WORKER_PS1);
+		} catch (e) {
+			// Nothing on disk can be vouched for, so nothing is started. The next
+			// image asks again, because no worker is running to skip the check.
+			console.warn("Power Extract: could not write the OCR worker", e);
+			this.scriptAbsPath = null;
+			return "";
+		}
+		this.scriptAbsPath = this.absolutePath(rel);
+		return this.scriptAbsPath ?? "";
 	}
 
 	/** A vault path as the operating system sees it. Null when the vault is not

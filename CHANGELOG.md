@@ -2,6 +2,18 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.3 - 2026-08-03
+
+### Security
+
+- **The OCR host is started by its full path** (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`) rather than by name. Started without a shell, Windows resolves a bare program name against the calling process's directory and the working directory before it reaches PATH, so a file named `powershell.exe` left in either one would have been started in place of the real one.
+- **The worker script is checked against the shipped copy before every start,** and rewritten if it differs. It was checked once per session, which was enough for a fresh install or an upgrade but not for the rest: the script lives in the vault, where sync services write and other applications can reach, and a worker that has idled out is started again from whatever the file holds at that moment. The only script that runs is now the one inside `main.js`. While a worker is up its script cannot be swapped underneath it, so that is the one case the check is skipped.
+- `shell: false` is now passed explicitly. It was already the default, and the difference between running a program and handing a string to a command interpreter should not have to be read out of an absence.
+
+### Changed
+
+- The README states plainly what the plugin can reach on your machine, and where in the source each one is: starting the OCR host, listing vault files for the image picker and for **Tidy up**, and writing to the clipboard. There is no network code in the plugin.
+
 ## 1.1.2 - 2026-08-03
 
 ### Changed
