@@ -9,6 +9,7 @@ import {
 	type SettingDefinitionRender,
 	TFile,
 } from "obsidian";
+import { spawn } from "node:child_process";
 import { type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "./cache";
 import { OcrEngine, type WorkerProcess, unavailableMessage, type OcrUnavailable } from "./ocr";
 import { OCR_WORKER_PS1 } from "./worker";
@@ -18,6 +19,16 @@ import { OCR_WORKER_PS1 } from "./worker";
  *  machine, so it is offered and allowed to fail per file rather than being
  *  refused outright here. */
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
+
+/** Spawn, narrowed to the one call this plugin makes and the one shape it
+ *  needs back. Node's ambient types are deliberately not part of the contract:
+ *  the directory's review linter runs without them, and anything reached
+ *  through them there counts as untyped and is reported as unsafe. */
+const spawnProcess = spawn as unknown as (
+	cmd: string,
+	args: string[],
+	opts: { windowsHide: boolean }
+) => WorkerProcess;
 
 interface PowerExtractSettings {
 	/** Offer "Extract text" when right-clicking an image. */
@@ -184,7 +195,7 @@ export default class PowerExtractPlugin extends Plugin {
 	 *  Windows has no recognizer. */
 	unavailableReason(): OcrUnavailable | null {
 		if (!Platform.isDesktopApp) return "no-node";
-		if (this.nodeProcess()?.platform !== "win32") return "not-windows";
+		if (!Platform.isWin) return "not-windows";
 		return this.engine?.unavailable ?? null;
 	}
 
@@ -208,28 +219,10 @@ export default class PowerExtractPlugin extends Plugin {
 
 	/* ---------------- the worker ---------------- */
 
-	/** node:child_process, or null when there is none (mobile). Required
-	 *  lazily: naming it at the top of the file would break the plugin on a
-	 *  phone before any of it ran. */
-	private nodeCp(): typeof import("node:child_process") | null {
-		try {
-			return require("node:child_process") as typeof import("node:child_process");
-		} catch {
-			return null;
-		}
-	}
-
-	private nodeProcess(): NodeJS.Process | null {
-		try {
-			return process;
-		} catch {
-			return null;
-		}
-	}
-
+	/** Start a PowerShell hosting the recognizer. Desktop-only by manifest, so
+	 *  the import at the top of this file is always satisfied by the time this
+	 *  runs. */
 	private spawnWorker(): WorkerProcess {
-		const cp = this.nodeCp();
-		if (!cp) throw new Error("no child processes on this platform");
 		const script = this.scriptAbsPath;
 		if (!script) throw new Error("the OCR worker has not been written yet");
 		// No -ExecutionPolicy override: the script is written here by the plugin
@@ -237,9 +230,9 @@ export default class PowerExtractPlugin extends Plugin {
 		// default RemoteSigned policy runs it as-is. Asking for Bypass when it
 		// is not needed is the kind of thing that makes a security product take
 		// an interest.
-		return cp.spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script], {
+		return spawnProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script], {
 			windowsHide: true,
-		}) as unknown as WorkerProcess;
+		});
 	}
 
 	private scriptAbsPath: string | null = null;

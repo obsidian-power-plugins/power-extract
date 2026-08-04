@@ -78,8 +78,8 @@ export class OcrEngine {
 	 * generation is history.
 	 */
 	private gen = 0;
-	private idleTimer: ReturnType<typeof setTimeout> | null = null;
-	private jobTimer: ReturnType<typeof setTimeout> | null = null;
+	private idleTimer: number | null = null;
+	private jobTimer: number | null = null;
 	private stopped = false;
 
 	/** Set once the worker says it has no recognizer, so the next 13,000 images
@@ -142,7 +142,7 @@ export class OcrEngine {
 		this.clearIdle();
 		const job = this.queue.shift()!;
 		this.active = job;
-		this.jobTimer = setTimeout(() => {
+		this.jobTimer = window.setTimeout(() => {
 			// A wedged engine cannot be asked politely to let go of the image it
 			// is holding, and everything behind it waits until it does. Drop the
 			// worker, fail this one image, and carry on with the rest: a single
@@ -218,7 +218,11 @@ export class OcrEngine {
 	private onLine(line: string) {
 		let msg: { ready?: boolean; lang?: string; id?: string; text?: string; err?: string };
 		try {
-			msg = JSON.parse(line);
+			// JSON.parse hands back `any`, and a bare `5` or `null` parses fine.
+			// Insist on an object before anything reads a field off it.
+			const parsed: unknown = JSON.parse(line);
+			if (!parsed || typeof parsed !== "object") throw new Error("not an object");
+			msg = parsed;
 		} catch {
 			// Not ours. PowerShell will occasionally put a progress record or a
 			// warning on stdout, and none of it is a job result.
@@ -289,7 +293,7 @@ export class OcrEngine {
 
 	private scheduleIdle() {
 		this.clearIdle();
-		this.idleTimer = setTimeout(() => {
+		this.idleTimer = window.setTimeout(() => {
 			this.idleTimer = null;
 			if (!this.active && !this.queue.length) this.quit();
 		}, this.idleMs);
@@ -297,14 +301,14 @@ export class OcrEngine {
 
 	private clearIdle() {
 		if (this.idleTimer !== null) {
-			clearTimeout(this.idleTimer);
+			window.clearTimeout(this.idleTimer);
 			this.idleTimer = null;
 		}
 	}
 
 	private clearJobTimer() {
 		if (this.jobTimer !== null) {
-			clearTimeout(this.jobTimer);
+			window.clearTimeout(this.jobTimer);
 			this.jobTimer = null;
 		}
 	}

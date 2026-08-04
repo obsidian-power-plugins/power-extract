@@ -1,4 +1,10 @@
 // Node unit tests for the parts that hold no Obsidian. Run: npm test
+
+// The engine schedules through window.setTimeout, which is what Obsidian wants
+// so a timer belongs to the popout window it was started in. Node has no
+// window, so point one at the global and the timers resolve to Node's own.
+(globalThis as { window?: unknown }).window ??= globalThis;
+
 import { CACHE_VERSION, type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "../src/cache";
 import { OcrEngine, type WorkerProcess, unavailableMessage } from "../src/ocr";
 import { OCR_WORKER_PS1 } from "../src/worker";
