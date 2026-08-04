@@ -2,6 +2,24 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.1 - 2026-08-03
+
+### Changed
+
+- The worker is started through a plain import of `node:child_process` rather
+  than a lazy `require`, and the Windows check now asks Obsidian's own
+  `Platform.isWin` instead of reading Node's `process`. The plugin is
+  desktop-only, so nothing was gained by deferring either one, and neither now
+  depends on Node's ambient types being present to type-check.
+- Timers are scheduled with `window.setTimeout`, so a timer belongs to the
+  window it was started in and survives a popout.
+
+### Fixed
+
+- A line from the worker that parses as valid JSON but is not an object (a bare
+  number, or `null`) is now rejected as unrecognized instead of being read as a
+  job result.
+
 ## 1.1.0 - 2026-08-03
 
 ### Changed
