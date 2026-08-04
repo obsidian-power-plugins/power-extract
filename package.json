@@ -1,6 +1,6 @@
 {
 	"name": "powerextract",
-	"version": "1.1.1",
+	"version": "1.1.2",
 	"description": "Obsidian plugin: read the text inside images with the OCR built into Windows, and hand it to other plugins",
 	"main": "main.js",
 	"type": "module",

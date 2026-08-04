@@ -2,6 +2,14 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.2 - 2026-08-03
+
+### Changed
+
+- The settings tab reaches its pre-1.13 redraw through the same cast that
+  checks for the 1.13 one, so the fallback is no longer reported as a
+  deprecated call. Behavior is unchanged on either version.
+
 ## 1.1.1 - 2026-08-03
 
 ### Changed
