@@ -2,6 +2,16 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.4 - 2026-08-04
+
+### Fixed
+
+- **The environment is read from `node:process` rather than through `globalThis`.** 1.1.3 reached for `%SystemRoot%` through the global object, which the directory's review flags: plugins are asked to use `window` or `activeWindow`, so that code touching a popout window addresses the right one. This code is not window-shaped at all, it wants Node's environment, so it now imports it the same way the line above it imports spawn. Nothing about how the OCR host is found has changed.
+
+### Changed
+
+- **The casts around the worker say what they are actually for.** Now that the tsconfig names the node types, `spawn` and the environment are typed properly, and the only thing still needing a cast is the child process's three streams: they are declared as possibly null, because a process started with other stdio options has none, while this one always has pipes. The environment needed no cast at all and no longer carries one.
+
 ## 1.1.3 - 2026-08-03
 
 ### Security

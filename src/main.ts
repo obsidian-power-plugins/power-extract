@@ -10,6 +10,7 @@ import {
 	TFile,
 } from "obsidian";
 import { spawn } from "node:child_process";
+import { env } from "node:process";
 import { type CacheMap, cacheStats, isFresh, parseCache, pruneCache, serializeCache } from "./cache";
 import { OcrEngine, type WorkerProcess, unavailableMessage, type OcrUnavailable } from "./ocr";
 import { OCR_WORKER_PS1, powershellPath, workerArgs } from "./worker";
@@ -20,23 +21,33 @@ import { OCR_WORKER_PS1, powershellPath, workerArgs } from "./worker";
  *  refused outright here. */
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
 
-/** Spawn, narrowed to the one call this plugin makes and the one shape it
- *  needs back. Node's ambient types are deliberately not part of the contract:
- *  the directory's review linter runs without them, and anything reached
- *  through them there counts as untyped and is reported as unsafe. */
+/** Spawn, narrowed to the one call this plugin makes and the one shape it needs
+ *  back.
+ *
+ *  The cast is for the streams, not for the types: a ChildProcess declares
+ *  stdin, stdout and stderr as possibly null, because a process started with
+ *  other stdio options has none. This one is always started with pipes, so all
+ *  three are always there, and `WorkerProcess` says exactly that and nothing
+ *  more. Everything else about the call is checked normally now that the
+ *  tsconfig names the node types. */
 const spawnProcess = spawn as unknown as (
 	cmd: string,
 	args: string[],
 	opts: { windowsHide: boolean; shell: boolean }
 ) => WorkerProcess;
 
-/** %SystemRoot%, read through a declared shape for the same reason spawn is
- *  narrowed above, and because Obsidian has nothing of its own that answers
- *  this. Nothing is written to the environment and nothing else is read from
- *  it. */
+/** Where Windows is installed, for building the path to the OCR host.
+ *
+ *  From `node:process`, not `globalThis`. The review asks plugins to reach for
+ *  `window` or `activeWindow` so that code touching a popout window addresses
+ *  the right one, and it flags the global object on sight. This is not
+ *  window-shaped at all: it wants Node's environment, so it asks Node for it,
+ *  the way the line above asks Node for spawn.
+ *
+ *  Read-only, and only ever %SystemRoot%: nothing is written to the environment
+ *  and nothing else is read from it. */
 function systemRoot(): string | undefined {
-	const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-	return proc?.env?.SystemRoot;
+	return env.SystemRoot;
 }
 
 interface PowerExtractSettings {
