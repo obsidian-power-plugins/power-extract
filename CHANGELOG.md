@@ -2,6 +2,14 @@
 
 All notable changes to Power Extract. Dates are when the version was cut.
 
+## 1.1.6
+
+### Changed
+
+- The README is about half its old length and written for someone reading it for the first time. The reasoning behind each decision is kept only where it changes what you would actually do.
+- It now lists the other Power plugins, with a line each and a link, and says plainly that every one of them works on its own.
+- The Buy Me a Coffee button moved to the foot of the page, under Support, instead of sitting under the title before the plugin has been described.
+
 ## 1.1.4 - 2026-08-04
 
 ### Fixed
